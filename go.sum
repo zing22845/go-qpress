@@ -1,0 +1,4 @@
+github.com/Hiroko103/go-quicklz v0.0.0-20190115215310-59904abc50d0 h1:6+dYUy8Dg9WdPkXnA3MtdAZq1ry1+pLrc+ZMCMi0MPU=
+github.com/Hiroko103/go-quicklz v0.0.0-20190115215310-59904abc50d0/go.mod h1:qBfAulKipfG2mar83JHqv6ykKbgDXHbmTWPY5gvr2zw=
+github.com/alitto/pond v1.7.1 h1:HFXCRmJxDD031ZgwB7KfWItaePzJR9OlkLLjOo82JXo=
+github.com/alitto/pond v1.7.1/go.mod h1:/TYBaKCXvQ8Qiy3TfOoKeu6K7AVAhMpvu4itSpGdws0=
