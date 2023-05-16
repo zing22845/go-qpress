@@ -1,6 +1,6 @@
-module go-qpress
+module github.com/zing22845/go-qpress
 
-go 1.14
+go 1.19
 
 require (
 	github.com/Hiroko103/go-quicklz v0.0.0-20190115215310-59904abc50d0
