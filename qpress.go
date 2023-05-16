@@ -62,7 +62,8 @@ const (
 	TypeFile         = 'F'
 	TypeNew          = 'N'
 	TypeEnd          = 'E'
-	DefaultChunkSize = 65536
+	DefaultChunkSize = 1024
+	ChunkHeaderSize  = 9
 )
 
 var (
@@ -86,6 +87,23 @@ type TargetType [1]byte
 type Target interface {
 	ReadType(r io.Reader) (err error)
 	ReadHeader(r io.Reader) (err error)
+}
+
+// Reader provides sequential access to chunks from an qpress. Each chunk returned represents a
+// contiguous set of bytes for a file compressed in the qpress file. The Next method advances the stream
+// and returns the next chunk in the archive. Each archive then acts as a reader for its contiguous set of bytes
+type Reader struct {
+	reader io.Reader
+}
+
+// NewReader creates a new Reader by wrapping the provided reader
+func NewReader(reader io.Reader) *Reader {
+	return &Reader{reader: reader}
+}
+
+// Next advances the Reader and returns the next DataBlock.
+func (r *Reader) NextBlock() (dataBlock *DataBlock, err error) {
+	return
 }
 
 // ARCHIVE =        ARCHIVEHEADER + (1 or more of UPDIR | DOWNDIR | FILE)
@@ -128,7 +146,6 @@ type DataBlock struct {
 	Checksum           [4]byte
 	CompressedChunk    []byte
 	CompressedSize     int64
-	DecompressedChunk  []byte
 	DecompressedSize   int64
 	DecompressedOffset int64
 }
@@ -139,40 +156,40 @@ type FileTrailer struct {
 	RecoverInfo
 }
 
+// ReadRecoverInfo reads the RecoverInfo from the given reader. It returns
+// an error if the reader returns an error, or if the reader returns fewer
+// than 8 bytes.
 func (ri *RecoverInfo) ReadRecoverInfo(r io.Reader) (err error) {
-	n, err := r.Read(ri[:])
-	if err != nil {
-		return err
-	}
-	if n != 8 {
-		return io.ErrUnexpectedEOF
-	}
-	/*
-		if !bytes.Equal(ri[:], EmptyRecoverInfo) {
-			return fmt.Errorf("non-empty recover info: %v, %v", ri[:], EmptyRecoverInfo)
-		}
-	*/
+	err = binary.Read(r, nil, ri)
 	return
 }
 
+// ReadStarterTail reads the starter tail from the given io.Reader.
+//
+// The starter tail is a sequence of bytes that identifies the start of
+// a starter file. It is typically seven bytes long.
+//
+// The starter tail consists of the characters 'S' 'T' 'A' 'R' 'T' 'E' 'R'
+// and is followed by a newline character.
+//
+// If the given io.Reader returns an error before the entire starter tail
+// is read, ReadStarterTail returns the number of bytes read and the error.
+// If the given io.Reader returns io.EOF before the entire starter tail is
+// read, ReadStarterTail returns io.ErrUnexpectedEOF.
 func (s *StarterTail) ReadStarterTail(r io.Reader) (err error) {
-	n, err := r.Read(s[:])
-	if err != nil {
-		return err
-	}
-	if n != 7 {
-		return io.ErrUnexpectedEOF
-	}
-	return
+	return binary.Read(r, nil, s)
 }
 
+// ReadType reads a TargetType from the given Reader.
 func (t *TargetType) ReadType(r io.Reader) (err error) {
 	*t, err = ReadByte(r)
-	return err
+	return
 }
 
+// Decompress reads the archive file header and then processes each target
+// until it finds the end of the file.
 func (af *ArchiveFile) Decompress(r io.Reader) (err error) {
-	// defer profile.Start(profile.MemProfile, profile.ProfilePath("."), profile.NoShutdownHook).Stop()
+	// Read the archive file header.
 	err = af.ReadFileHeader(r)
 	if err != nil {
 		return fmt.Errorf("read file header failed: %s", err.Error())
@@ -180,6 +197,7 @@ func (af *ArchiveFile) Decompress(r io.Reader) (err error) {
 
 	tt := new(TargetType)
 	for {
+		// Read the target type.
 		err = tt.ReadType(r)
 		if err == io.EOF {
 			return nil
@@ -187,9 +205,11 @@ func (af *ArchiveFile) Decompress(r io.Reader) (err error) {
 		if err != nil {
 			return fmt.Errorf("read type %s failed: %s", tt[:], err.Error())
 		}
+
+		// Process the target based on its type.
 		switch tt[0] {
 		case 0:
-			return
+			return nil
 		case TypeDown:
 			DownTarget := new(DownTarget)
 			DownTarget.TargetType = *tt
@@ -222,9 +242,12 @@ func (af *ArchiveFile) Decompress(r io.Reader) (err error) {
 	}
 }
 
+// ReadFileHeader reads and verifies the magic number and chunk size from the
+// archive header. It also sets the ChunkSize variable to the chunk size read
+// from the archive header.
 func (ah *ArchiveHeader) ReadFileHeader(r io.Reader) (err error) {
 	// get qpress magic
-	_, err = r.Read(ah.Magic[:])
+	err = binary.Read(r, nil, &ah.Magic)
 	if err != nil {
 		return fmt.Errorf("read magic failed: %s", err.Error())
 	}
@@ -232,20 +255,17 @@ func (ah *ArchiveHeader) ReadFileHeader(r io.Reader) (err error) {
 	if !bytes.Equal(ah.Magic[:], QpressMagic) {
 		return fmt.Errorf("invalid magic: %s", ah.Magic)
 	}
-
 	// get chunk size
-	chunkSizeBytes := make([]byte, 8)
-	_, err = r.Read(chunkSizeBytes)
+	err = binary.Read(r, binary.LittleEndian, &ah.ChunkSize)
 	if err != nil {
 		return fmt.Errorf("read chunk size failed: %s", err.Error())
 	}
-	ah.ChunkSize = binary.LittleEndian.Uint64(chunkSizeBytes)
 	ChunkSize = ah.ChunkSize
 	return
 }
 
 func (t *TargetHeader) ReadHeader(r io.Reader) (err error) {
-	t.NameLength, t.Name, err = ReadLength32EncodedString(r)
+	t.NameLength, t.Name, err = ReadLengthU32EncodedString(r)
 	if err != nil {
 		return err
 	}
@@ -280,10 +300,10 @@ func (t *FileTarget) Decompress(r io.Reader) (err error) {
 	}
 	defer f.Close()
 
-	var maxWorkers = 8
-	var maxDataBlockQueue = 10000
+	var maxWorkers = 10
+	var maxDataBlockQueue = 40
 
-	pool := pond.New(maxWorkers, maxDataBlockQueue)
+	pool := pond.New(maxWorkers, maxDataBlockQueue, pond.Strategy(pond.Balanced()))
 
 	defer pool.StopAndWait()
 
@@ -295,25 +315,26 @@ func (t *FileTarget) Decompress(r io.Reader) (err error) {
 		}
 		err := tt.ReadType(r)
 		if err != nil {
-			return fmt.Errorf("read type %s failed: %s", tt[:], err.Error())
+			return fmt.Errorf("read type %s failed: %w", tt[:], err)
 		}
 		switch tt[0] {
 		case TypeNew:
-			block := &DataBlock{}
+			block := NewDataBlock()
 			err = block.ReadBlock(r)
 			if err != nil {
-				return fmt.Errorf("decompress block failed: %s", err.Error())
+				return fmt.Errorf("decompress block failed: %w", err)
 			}
 			block.DecompressedOffset = offset
 			pool.Submit(func() {
-				err := block.DecompressChunk()
+				decompressedChunk := make([]byte, block.DecompressedSize)
+				err := block.DecompressChunk(&decompressedChunk)
 				if err != nil {
-					fmt.Printf("decompress chunk failed: %s", err.Error())
+					fmt.Printf("decompress chunk failed: %+v", err)
 					return
 				}
-				_, err = f.WriteAt(block.DecompressedChunk, block.DecompressedOffset)
+				_, err = f.WriteAt(decompressedChunk, block.DecompressedOffset)
 				if err != nil {
-					fmt.Printf("write failed: %s\n", err.Error())
+					fmt.Printf("write failed: %+v", err)
 					return
 				}
 			})
@@ -330,6 +351,24 @@ func (t *FileTarget) Decompress(r io.Reader) (err error) {
 	}
 }
 
+func NewDataBlock() *DataBlock {
+	return &DataBlock{
+		BlockType:          TargetType{TypeNew},
+		CompressedChunk:    make([]byte, ChunkSize, ChunkSize+400),
+		CompressedSize:     0,
+		DecompressedSize:   0,
+		DecompressedOffset: 0,
+	}
+}
+
+func (t *DataBlock) InitBlock() error {
+	t.CompressedChunk = make([]byte, ChunkSize, ChunkSize+400)
+	t.CompressedSize = 0
+	t.DecompressedSize = 0
+	t.DecompressedOffset = 0
+	return nil
+}
+
 func (t *DataBlock) ReadBlock(r io.Reader) (err error) {
 	err = t.ReadStarterTail(r)
 	if err != nil {
@@ -338,80 +377,56 @@ func (t *DataBlock) ReadBlock(r io.Reader) (err error) {
 	if !bytes.Equal(t.StarterTail[:], BlockStarter[1:]) {
 		return fmt.Errorf("invalid block starter tail: %s", t.StarterTail)
 	}
-
 	err = t.ReadRecoverInfo(r)
 	if err != nil {
 		return err
 	}
-
 	err = t.ReadChecksum(r)
 	if err != nil {
 		return err
 	}
-
 	err = t.ReadChunk(r)
 	if err != nil {
 		return err
 	}
-
 	return
 }
 
 func (t *DataBlock) ReadChecksum(r io.Reader) (err error) {
-	n, err := r.Read(t.Checksum[:])
-	if err != nil {
-		return err
-	}
-	if n != 4 {
-		return fmt.Errorf("invalid checksum: %s", t.Checksum)
-	}
+	err = binary.Read(r, nil, &t.Checksum)
 	return
 }
 
 func (t *DataBlock) ReadChunk(r io.Reader) (err error) {
-	t.CompressedChunk = make([]byte, ChunkSize+400)
-
 	// read header of CompressedChunk
-	header := t.CompressedChunk[:9]
-	n, err := r.Read(header)
+	header := t.CompressedChunk[:ChunkHeaderSize]
+	err = binary.Read(r, nil, &header)
 	if err != nil {
 		return err
 	}
-	if n != 9 {
-		return fmt.Errorf("read chunk header failed")
-	}
-
 	// read CompressedChunk
 	t.CompressedSize = quicklz.Size_compressed(&header)
-	n, err = r.Read(t.CompressedChunk[9:t.CompressedSize])
+	payload := t.CompressedChunk[ChunkHeaderSize:t.CompressedSize]
+	err = binary.Read(r, nil, payload)
 	if err != nil {
 		return err
 	}
-	if int64(n) != t.CompressedSize-9 {
-		return fmt.Errorf("read chunk size %d is not equal expect %d", n, t.CompressedSize-9)
-	}
-
 	// init DecompressedChunk
 	t.DecompressedSize = quicklz.Size_decompressed(&header)
-	t.DecompressedChunk = make([]byte, t.DecompressedSize)
 	return
 }
 
-func (t *DataBlock) DecompressChunk() (err error) {
-	qlz, err := quicklz.New(quicklz.COMPRESSION_LEVEL_1, quicklz.STREAMING_BUFFER_100000)
+func (t *DataBlock) DecompressChunk(decompressedChunk *[]byte) (err error) {
+	qlz, err := quicklz.New(quicklz.COMPRESSION_LEVEL_1, quicklz.STREAMING_BUFFER_0)
 	if err != nil {
 		return err
 	}
-
 	// Decompress data to DecompressedChunk
-	part := t.CompressedChunk[:t.CompressedSize]
-	n, err := qlz.Decompress(&part, &t.DecompressedChunk)
+	_, err = qlz.Decompress(&t.CompressedChunk, decompressedChunk)
 	if err != nil {
 		return fmt.Errorf("decompress: %s", err.Error())
 	}
-	t.DecompressedChunk = t.DecompressedChunk[:n]
-
-	return
+	return nil
 }
 
 func (t *FileTrailer) ReadTrailer(r io.Reader) (err error) {
@@ -428,7 +443,7 @@ func (t *FileTrailer) ReadTrailer(r io.Reader) (err error) {
 }
 
 func ReadByte(r io.Reader) (b [1]byte, err error) {
-	_, err = io.ReadFull(r, b[:])
+	err = binary.Read(r, nil, &b)
 	return b, err
 }
 
@@ -443,28 +458,16 @@ func ReadTerminator(r io.Reader) (terminator [1]byte, err error) {
 	return terminator, err
 }
 
-func ReadLength32EncodedString(r io.Reader) (readBytesLen uint32, readBytes []byte, err error) {
+func ReadLengthU32EncodedString(r io.Reader) (readBytesLen uint32, readBytes []byte, err error) {
 	// get length
-	lenBuf := make([]byte, 4)
-	n, err := r.Read(lenBuf)
+	err = binary.Read(r, binary.LittleEndian, &readBytesLen)
 	if err != nil {
 		return readBytesLen, readBytes, err
 	}
-	if n != 4 {
-		return readBytesLen, readBytes, io.ErrUnexpectedEOF
-	}
 
-	// get string
-	readBytesLen = binary.LittleEndian.Uint32(lenBuf)
+	// get bytes
 	readBytes = make([]byte, readBytesLen)
-	n, err = r.Read(readBytes)
-	if err != nil {
-		return readBytesLen, readBytes, err
-	}
-	if uint32(n) != readBytesLen {
-		return readBytesLen, readBytes, io.ErrUnexpectedEOF
-	}
-
+	err = binary.Read(r, nil, &readBytes)
 	return readBytesLen, readBytes, err
 }
 
