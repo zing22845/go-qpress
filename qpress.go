@@ -1,4 +1,4 @@
-package main
+package qpress
 
 /*
 This is a go version implementation of qpress(github.com/PierreLvx/qpress)
@@ -50,6 +50,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 
 	quicklz "github.com/Hiroko103/go-quicklz"
 
@@ -188,11 +190,15 @@ func (t *TargetType) ReadType(r io.Reader) (err error) {
 
 // Decompress reads the archive file header and then processes each target
 // until it finds the end of the file.
-func (af *ArchiveFile) Decompress(r io.Reader) (err error) {
+func (af *ArchiveFile) Decompress(r io.Reader, baseDIR string, limitSize int64) (err error) {
 	// Read the archive file header.
 	err = af.ReadFileHeader(r)
 	if err != nil {
 		return fmt.Errorf("read file header failed: %s", err.Error())
+	}
+	err = os.Mkdir("tmp", 0755)
+	if err != nil && !os.IsExist(err) {
+		return err
 	}
 
 	tt := new(TargetType)
@@ -231,8 +237,72 @@ func (af *ArchiveFile) Decompress(r io.Reader) (err error) {
 		case TypeFile:
 			FileTarget := &FileTarget{}
 			FileTarget.TargetType = *tt
-			err = FileTarget.Decompress(r)
+			err = FileTarget.Decompress(r, baseDIR, limitSize)
 			if err != nil {
+				if strings.HasPrefix(err.Error(), "partial decompress to limited size") {
+					return nil
+				}
+				return err
+			}
+			af.Targets = append(af.Targets, FileTarget)
+		default:
+			return fmt.Errorf("unknown type: %s", tt[:])
+		}
+	}
+}
+
+func (af *ArchiveFile) DecompressStream(r io.Reader, w io.Writer, limitSize int64) (err error) {
+	// Read the archive file header.
+	err = af.ReadFileHeader(r)
+	if err != nil {
+		return fmt.Errorf("read file header failed: %s", err.Error())
+	}
+	err = os.Mkdir("tmp", 0755)
+	if err != nil && !os.IsExist(err) {
+		return err
+	}
+
+	tt := new(TargetType)
+	for {
+		// Read the target type.
+		err = tt.ReadType(r)
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read type %s failed: %s", tt[:], err.Error())
+		}
+
+		// Process the target based on its type.
+		switch tt[0] {
+		case 0:
+			return nil
+		case TypeDown:
+			DownTarget := new(DownTarget)
+			DownTarget.TargetType = *tt
+			err = DownTarget.Read(r)
+			if err != nil {
+				return err
+			}
+			af.Targets = append(af.Targets, DownTarget)
+			return fmt.Errorf("unsupport down directory")
+		case TypeUp:
+			UpTarget := new(UpTarget)
+			UpTarget.TargetType = *tt
+			err = UpTarget.Read(r)
+			if err != nil {
+				return err
+			}
+			af.Targets = append(af.Targets, UpTarget)
+			return fmt.Errorf("unsupport up directory")
+		case TypeFile:
+			FileTarget := &FileTarget{}
+			FileTarget.TargetType = *tt
+			err = FileTarget.DecompressStream(r, w, limitSize)
+			if err != nil {
+				if strings.HasPrefix(err.Error(), "partial decompress to limited size") {
+					return nil
+				}
 				return err
 			}
 			af.Targets = append(af.Targets, FileTarget)
@@ -285,7 +355,7 @@ func (t *DownTarget) Read(r io.Reader) (err error) {
 	return t.ReadHeader(r)
 }
 
-func (t *FileTarget) Decompress(r io.Reader) (err error) {
+func (t *FileTarget) Decompress(r io.Reader, baseDIR string, limitSize int64) (err error) {
 	var offset int64
 
 	err = t.ReadHeader(r)
@@ -293,8 +363,15 @@ func (t *FileTarget) Decompress(r io.Reader) (err error) {
 		return err
 	}
 
+	targetFilePath := filepath.Join(baseDIR, string(t.Name))
+	_, err = os.Stat(targetFilePath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	} else if err == nil {
+		return fmt.Errorf("file %s already exists", targetFilePath)
+	}
 	// create decompressed file
-	f, err := os.OpenFile(string(t.Name), os.O_CREATE|os.O_WRONLY, 0640)
+	f, err := os.OpenFile(targetFilePath, os.O_CREATE|os.O_WRONLY, 0640)
 	if err != nil {
 		return err
 	}
@@ -324,6 +401,9 @@ func (t *FileTarget) Decompress(r io.Reader) (err error) {
 			if err != nil {
 				return fmt.Errorf("decompress block failed: %w", err)
 			}
+			if limitSize > 0 && offset+block.DecompressedSize > limitSize {
+				return fmt.Errorf("partial decompress to limited size %d", limitSize)
+			}
 			block.DecompressedOffset = offset
 			pool.Submit(func() {
 				decompressedChunk := make([]byte, block.DecompressedSize)
@@ -338,6 +418,57 @@ func (t *FileTarget) Decompress(r io.Reader) (err error) {
 					return
 				}
 			})
+			offset += block.DecompressedSize
+		case TypeEnd:
+			err = t.ReadTrailer(r)
+			if err != nil {
+				return fmt.Errorf("read trailer failed: %s", err.Error())
+			}
+			return nil
+		default:
+			return fmt.Errorf("invalid block header, 'N' or 'E' not found, get: %d", tt[:])
+		}
+	}
+}
+
+func (t *FileTarget) DecompressStream(r io.Reader, w io.Writer, limitSize int64) (err error) {
+	var offset int64
+
+	err = t.ReadHeader(r)
+	if err != nil {
+		return err
+	}
+
+	// decompress blocks
+	tt := new(TargetType)
+	for {
+		if err != nil {
+			return err
+		}
+		err := tt.ReadType(r)
+		if err != nil {
+			return fmt.Errorf("read type %s failed: %w", tt[:], err)
+		}
+		switch tt[0] {
+		case TypeNew:
+			block := NewDataBlock()
+			err = block.ReadBlock(r)
+			if err != nil {
+				return fmt.Errorf("decompress block failed: %w", err)
+			}
+			if limitSize > 0 && offset+block.DecompressedSize > limitSize {
+				return fmt.Errorf("partial decompress to limited size %d", limitSize)
+			}
+			block.DecompressedOffset = offset
+			decompressedChunk := make([]byte, block.DecompressedSize)
+			err = block.DecompressChunk(&decompressedChunk)
+			if err != nil {
+				return fmt.Errorf("decompress chunk failed: %+v", err)
+			}
+			_, err = w.Write(decompressedChunk)
+			if err != nil {
+				return fmt.Errorf("write failed: %+v", err)
+			}
 			offset += block.DecompressedSize
 		case TypeEnd:
 			err = t.ReadTrailer(r)
@@ -494,9 +625,17 @@ func main() {
 	archiveFile := &ArchiveFile{}
 
 	fmt.Println("filename: ", inputFile.Name())
-	err = archiveFile.Decompress(inputFile)
+	fmt.Println("filename: ", inputFile.Name())
+	err = archiveFile.Decompress(inputFile, "./tmp/", 1024*1024)
 	if err != nil {
 		fmt.Printf("decompress qpress file failed: %s\n", err.Error())
 		os.Exit(1)
 	}
+	/*
+		err = archiveFile.DecompressStream(inputFile, os.Stdout, 1024*1024)
+		if err != nil {
+			fmt.Printf("decompress qpress file to stdout failed: %s\n", err.Error())
+			os.Exit(1)
+		}
+	*/
 }
