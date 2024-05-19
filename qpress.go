@@ -190,15 +190,15 @@ func (t *TargetType) ReadType(r io.Reader) (err error) {
 
 // Decompress reads the archive file header and then processes each target
 // until it finds the end of the file.
-func (af *ArchiveFile) Decompress(r io.Reader, baseDIR string, limitSize int64) (err error) {
+func (af *ArchiveFile) Decompress(r io.Reader, baseDIR string, limitSize int64) (isPartial bool, err error) {
 	// Read the archive file header.
 	err = af.ReadFileHeader(r)
 	if err != nil {
-		return fmt.Errorf("read file header failed: %s", err.Error())
+		return false, fmt.Errorf("read file header failed: %s", err.Error())
 	}
 	err = os.Mkdir("tmp", 0755)
 	if err != nil && !os.IsExist(err) {
-		return err
+		return false, err
 	}
 
 	tt := new(TargetType)
@@ -206,60 +206,60 @@ func (af *ArchiveFile) Decompress(r io.Reader, baseDIR string, limitSize int64) 
 		// Read the target type.
 		err = tt.ReadType(r)
 		if err == io.EOF {
-			return nil
+			return false, nil
 		}
 		if err != nil {
-			return fmt.Errorf("read type %s failed: %s", tt[:], err.Error())
+			return false, fmt.Errorf("read type %s failed: %s", tt[:], err.Error())
 		}
 
 		// Process the target based on its type.
 		switch tt[0] {
 		case 0:
-			return nil
+			return false, nil
 		case TypeDown:
 			DownTarget := new(DownTarget)
 			DownTarget.TargetType = *tt
 			err = DownTarget.Read(r)
 			if err != nil {
-				return err
+				return false, err
 			}
 			af.Targets = append(af.Targets, DownTarget)
-			return fmt.Errorf("unsupport down directory")
+			return false, fmt.Errorf("unsupport down directory")
 		case TypeUp:
 			UpTarget := new(UpTarget)
 			UpTarget.TargetType = *tt
 			err = UpTarget.Read(r)
 			if err != nil {
-				return err
+				return false, err
 			}
 			af.Targets = append(af.Targets, UpTarget)
-			return fmt.Errorf("unsupport up directory")
+			return false, fmt.Errorf("unsupport up directory")
 		case TypeFile:
 			FileTarget := &FileTarget{}
 			FileTarget.TargetType = *tt
 			err = FileTarget.Decompress(r, baseDIR, limitSize)
 			if err != nil {
 				if strings.HasPrefix(err.Error(), "partial decompress to limited size") {
-					return nil
+					return true, nil
 				}
-				return err
+				return false, err
 			}
 			af.Targets = append(af.Targets, FileTarget)
 		default:
-			return fmt.Errorf("unknown type: %s", tt[:])
+			return false, fmt.Errorf("unknown type: %s", tt[:])
 		}
 	}
 }
 
-func (af *ArchiveFile) DecompressStream(r io.Reader, w io.Writer, limitSize int64) (err error) {
+func (af *ArchiveFile) DecompressStream(r io.Reader, w io.Writer, limitSize int64) (isPartial bool, err error) {
 	// Read the archive file header.
 	err = af.ReadFileHeader(r)
 	if err != nil {
-		return fmt.Errorf("read file header failed: %s", err.Error())
+		return false, fmt.Errorf("read file header failed: %s", err.Error())
 	}
 	err = os.Mkdir("tmp", 0755)
 	if err != nil && !os.IsExist(err) {
-		return err
+		return false, err
 	}
 
 	tt := new(TargetType)
@@ -267,47 +267,47 @@ func (af *ArchiveFile) DecompressStream(r io.Reader, w io.Writer, limitSize int6
 		// Read the target type.
 		err = tt.ReadType(r)
 		if err == io.EOF {
-			return nil
+			return false, nil
 		}
 		if err != nil {
-			return fmt.Errorf("read type %s failed: %s", tt[:], err.Error())
+			return false, fmt.Errorf("read type %s failed: %s", tt[:], err.Error())
 		}
 
 		// Process the target based on its type.
 		switch tt[0] {
 		case 0:
-			return nil
+			return false, nil
 		case TypeDown:
 			DownTarget := new(DownTarget)
 			DownTarget.TargetType = *tt
 			err = DownTarget.Read(r)
 			if err != nil {
-				return err
+				return false, err
 			}
 			af.Targets = append(af.Targets, DownTarget)
-			return fmt.Errorf("unsupport down directory")
+			return false, fmt.Errorf("unsupport down directory")
 		case TypeUp:
 			UpTarget := new(UpTarget)
 			UpTarget.TargetType = *tt
 			err = UpTarget.Read(r)
 			if err != nil {
-				return err
+				return false, err
 			}
 			af.Targets = append(af.Targets, UpTarget)
-			return fmt.Errorf("unsupport up directory")
+			return false, fmt.Errorf("unsupport up directory")
 		case TypeFile:
 			FileTarget := &FileTarget{}
 			FileTarget.TargetType = *tt
 			err = FileTarget.DecompressStream(r, w, limitSize)
 			if err != nil {
 				if strings.HasPrefix(err.Error(), "partial decompress to limited size") {
-					return nil
+					return true, nil
 				}
-				return err
+				return false, err
 			}
 			af.Targets = append(af.Targets, FileTarget)
 		default:
-			return fmt.Errorf("unknown type: %s", tt[:])
+			return false, fmt.Errorf("unknown type: %s", tt[:])
 		}
 	}
 }
