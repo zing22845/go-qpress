@@ -31,10 +31,14 @@ func main() {
 
 	fmt.Println("filename: ", inputFile.Name())
 	fmt.Println("filename: ", inputFile.Name())
-	err = archiveFile.Decompress(inputFile, "./tmp/", 1024*1024)
+	var limitSize int64 = 1024 * 1024
+	isPartial, err := archiveFile.Decompress(inputFile, "./tmp/", limitSize)
 	if err != nil {
 		fmt.Printf("decompress qpress file failed: %s\n", err.Error())
 		os.Exit(1)
+	}
+	if isPartial {
+		fmt.Printf("partial decompress qpress file up to size: %d\n", limitSize)
 	}
 	/*
 		err = archiveFile.DecompressStream(inputFile, os.Stdout, 1024*1024)
