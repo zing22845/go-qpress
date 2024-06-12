@@ -390,7 +390,7 @@ func (t *FileTarget) Decompress(r io.Reader, baseDIR string, limitSize int64) (e
 		if err != nil {
 			return err
 		}
-		err := tt.ReadType(r)
+		err = tt.ReadType(r)
 		if err != nil {
 			return fmt.Errorf("read type %s failed: %w", tt[:], err)
 		}
@@ -407,14 +407,12 @@ func (t *FileTarget) Decompress(r io.Reader, baseDIR string, limitSize int64) (e
 			block.DecompressedOffset = offset
 			pool.Submit(func() {
 				decompressedChunk := make([]byte, block.DecompressedSize)
-				err := block.DecompressChunk(&decompressedChunk)
+				err = block.DecompressChunk(&decompressedChunk)
 				if err != nil {
-					fmt.Printf("decompress chunk failed: %+v", err)
 					return
 				}
 				_, err = f.WriteAt(decompressedChunk, block.DecompressedOffset)
 				if err != nil {
-					fmt.Printf("write failed: %+v", err)
 					return
 				}
 			})
@@ -445,7 +443,7 @@ func (t *FileTarget) DecompressStream(r io.Reader, w io.Writer, limitSize int64)
 		if err != nil {
 			return err
 		}
-		err := tt.ReadType(r)
+		err = tt.ReadType(r)
 		if err != nil {
 			return fmt.Errorf("read type %s failed: %w", tt[:], err)
 		}
